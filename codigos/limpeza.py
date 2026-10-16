@@ -43,7 +43,7 @@ CAMPOS_REGISTRO_01 = {
     "premax":      (70, 82),
     "premin":      (83, 95),
     "premed":      (96, 108),
-    "preult":      (109, 121),
+    "preult":      (109, 121),      
     "preofc":      (122, 134),
     "preofv":      (135, 147),
     "totneg":      (148, 152),
@@ -67,6 +67,8 @@ TICKER_PARA_CLASSE = {
     **{t: "acao" for t in TICKERS_ACOES},
     **{t: "fii" for t in TICKERS_FII},
     **{t: "etf" for t in TICKERS_ETF},
+    "ELET3": "ACAO",   # código antigo da Eletrobras (hoje AXIA3)
+    "EMBR3": "ACAO",   # código antigo da Embraer (hoje EMBJ3)
 }
 
 # Mercado à vista -- evita duplicar o mesmo ticker no mesmo dia por causa
@@ -86,7 +88,7 @@ def carregar_e_extrair(caminho_arquivo: Path) -> pl.LazyFrame:
     lf = pl.scan_csv(
         caminho_arquivo,
         has_header=False,
-        separator="\x01",
+        separator="\x01", # identificador para cortar, é um código de hexadecimal, conceito chamado de "start of heading"
         new_columns=["linha"],
         encoding="utf8-lossy",
     )
@@ -99,7 +101,7 @@ def filtrar_classes_de_interesse(lf: pl.LazyFrame) -> pl.LazyFrame:
     """Mantém só os 15 tickers escolhidos (ações, FIIs e ETFs), só mercado à vista,
     e marca a classe de cada ativo numa coluna nova."""
     todos_tickers = list(TICKER_PARA_CLASSE.keys())
-    codneg_limpo = pl.col("codneg").str.strip_chars()
+    codneg_limpo = pl.col("codneg").str.strip_chars() # o codneg é 
 
     classe_expr = (
         pl.when(codneg_limpo.is_in(TICKERS_ACOES)).then(pl.lit("acao"))
