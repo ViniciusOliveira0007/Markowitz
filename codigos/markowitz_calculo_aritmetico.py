@@ -15,6 +15,23 @@ TAXA_LIVRE_RISCO = 0.0    # ao ano (ex.: 0.10 = 10%). Aqui entraria o CDI/LCI
 SEMENTE = 42              # fixa o sorteio para o resultado ser reproduzível
 
 
+EVENTOS_CORPORATIVOS = {
+    ("B3SA3", "2021-05-17"): 3,
+}
+
+
+#ajusta os valores de Evento, para não terem um salto alarmante
+def ajustar_eventos(precos: pd.DataFrame, eventos: dict) -> pd.DataFrame:
+    """Ajusta os preços ANTERIORES à data de cada desdobramento/grupamento."""
+    precos = precos.copy()
+    for (ticker, data), fator in eventos.items():
+        if ticker not in precos.columns:
+            continue
+        antes = precos.index < pd.Timestamp(data)
+        precos.loc[antes, ticker] = precos.loc[antes, ticker] / fator
+    return precos
+
+
 # ----------------------------------------------------------------------
 # 1. Carregar e montar a tabela de preços
 # ----------------------------------------------------------------------
@@ -37,9 +54,16 @@ def carregar_precos(caminho: Path) -> pd.DataFrame:
 
     # pivot (e não pivot_table) dá erro se houver ticker repetido no mesmo dia,
     # o que serve de alarme caso o filtro de mercado à vista tenha falhado.
-    precos = df.pivot(index="data_pregao", columns="codneg", values="preult")
-    return precos.sort_index()
+    precos = df.pivot(index="data_pregao", columns="codneg", values="preult").sort_index()
+    return ajustar_eventos(precos, EVENTOS_CORPORATIVOS)
 
+def detectar_saltos(precos: pd.DataFrame, limite: float = 0.25) -> pd.DataFrame:
+    variacao = precos / precos.shift(1) - 1
+    tabela = (variacao.rename_axis("data").reset_index()
+              .melt(id_vars="data", var_name="codneg", value_name="retorno"))
+    tabela = tabela[tabela["retorno"].abs() > limite].copy()
+    tabela["razao_preco_antes_depois"] = 1 / (1 + tabela["retorno"])
+    return tabela   
 
 
 def diagnosticar_historico(precos: pd.DataFrame) -> pd.DataFrame:
@@ -49,9 +73,6 @@ def diagnosticar_historico(precos: pd.DataFrame) -> pd.DataFrame:
         "ultima_data": precos.apply(pd.Series.last_valid_index),
         "dias_com_preco": precos.notna().sum(),
     }).sort_values("primeira_data")
-
-
-
 
 
 
@@ -117,7 +138,7 @@ def plotar_fronteira(carteiras: pd.DataFrame, caminho_saida: Path) -> None:
     ax.set_xlabel("Risco (desvio padrão anual)")
     ax.set_ylabel("Retorno esperado anual")
     ax.set_title("Fronteira Eficiente de Markowitz")
-    ax.legend()
+    ax.legend(loc="upper left")
     fig.tight_layout()
 
     caminho_saida.parent.mkdir(parents=True, exist_ok=True)
@@ -140,7 +161,7 @@ def plotar_fronteira(carteiras: pd.DataFrame, caminho_saida: Path) -> None:
     ax.set_xlabel("Risco (desvio padrão anual)")
     ax.set_ylabel("Retorno esperado anual")
     ax.set_title("Fronteira Eficiente de Markowitz (retornos aritméticos)")
-    ax.legend()
+    ax.legend(loc="upper left")
     fig.tight_layout()
  
     caminho_saida.parent.mkdir(parents=True, exist_ok=True)
@@ -159,6 +180,8 @@ def main() -> None:
     retornos = calcular_retornos_aritmeticos(precos)
     print(f"Amostra comum: {retornos.index.min().date()} a {retornos.index.max().date()} "
           f"({len(retornos)} retornos diários)\n")
+
+    print(detectar_saltos(precos.dropna()))
 
     assert retornos.notna().all().all(), "sobrou NaN nos retornos"
     assert (retornos.abs() < 0.5).all().all(), "retorno diário acima de 50%: confira splits/erros"
