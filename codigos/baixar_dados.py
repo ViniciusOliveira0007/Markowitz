@@ -49,6 +49,9 @@ CLASSE_ATIVO = {
 }
 EVENTOS_CORPORATIVOS = {
     ("B3SA3", "2021-05-17"): 3,
+    ("ITUB4", "2025-03-18"): 1.10,
+    ("ITUB4", "2025-12-26"): 1.03,
+    ("AXIA3", "2025-12-22"): 1.2628,   # aproximação: o bônus veio em AXIA7
 }
 
 # Tickers do Yahoo (sufixo .SA). Ativos que mudaram de código: busca o novo e o antigo e junta.

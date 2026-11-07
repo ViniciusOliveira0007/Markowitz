@@ -11,21 +11,30 @@ Fluxo:
       -> carteiras aleatórias -> fronteira eficiente
 
 Arquivos de entrada:
-    cotahist_limpo.csv  (obrigatório)  colunas: data_pregao, codneg, preult, tpmerc, codbdi
-    proventos.csv       (opcional)     colunas: data_ex, codneg, tipo, valor
-                                       tipo = DIVIDENDO | JCP | RENDIMENTO (FII)
-                                       valor = R$ por ação/cota NOMINAL da época (use a DATA EX, não a de pagamento)
-    selic_diaria.csv    (opcional)     colunas: data, valor   (série 11 do BCB: % ao dia)
+    dados/dados_limpos/cotahist_limpo.csv  (obrigatório)  colunas: data_pregao, codneg, preult, tpmerc, codbdi
+    dados/dados_limpos/proventos.csv       (opcional)     colunas: data_ex, codneg, tipo, valor
+                                           tipo = DIVIDENDO | JCP | RENDIMENTO (FII)
+                                           valor = R$ por ação/cota NOMINAL da época (use a DATA EX, não a de pagamento)
+    dados/selic_diaria.csv                 (opcional)     colunas: data, selic_dia
+                                           (gerado pelo baixar_selic.py; selic_dia já em DECIMAL ao dia)
+
+A taxa livre de risco (rf) do Sharpe vem de taxa_livre_risco.py, calculada sobre o MESMO
+período da amostra de retornos.
 
 ATENÇÃO: as alíquotas abaixo refletem a legislação em vigor em out/2026 para pessoa física.
 Confirme antes de usar em trabalho oficial.
 """
+
+PROVENTOS_JA_AJUSTADOS = True   # True: o proventos.csv veio do montar_proventos_b3.py (já ajustado)
+
 
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+
+from taxa_livre_risco import taxa_livre_risco_anual
 
 # ----------------------------------------------------------------------
 # Configurações gerais
@@ -35,13 +44,18 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 PASTA_DADOS = BASE_DIR / "dados" / "dados_limpos"
 ARQUIVO_ENTRADA = PASTA_DADOS / "cotahist_limpo.csv"
 ARQUIVO_PROVENTOS = PASTA_DADOS / "proventos.csv"
-ARQUIVO_SELIC = PASTA_DADOS / "selic_diaria.csv"
+ARQUIVO_SELIC = BASE_DIR / "dados" / "selic_diaria.csv"   # onde o baixar_selic.py salva
 PASTA_RESULTADOS = BASE_DIR / "resultados" / "liquido"   # pasta própria: não sobrescreve o Markowitz bruto
 
 DIAS_UTEIS_ANO = 252
 N_CARTEIRAS = 2_000_000
-TAXA_LIVRE_RISCO = 0.0    # ao ano. Idealmente a Selic/CDI LÍQUIDA de IR
 SEMENTE = 42
+
+# Taxa livre de risco do Sharpe:
+#   False -> Selic BRUTA anualizada no período da amostra (convenção comum)
+#   True  -> retorno esperado LÍQUIDO do Tesouro Selic (mesma base das carteiras, que são líquidas)
+#            Só funciona se o Tesouro Selic estiver na carteira; senão cai para a Selic bruta.
+RF_USA_SELIC_LIQUIDA = False
 
 RENOMEAR_TICKERS = {
     "ELET3": "AXIA3",   # código antigo -> código atual
@@ -96,7 +110,7 @@ ALIQUOTA_JCP_ANTES = 0.15          # até 31/12/2025
 ALIQUOTA_JCP_DEPOIS = 0.175        # a partir de 01/01/2026 (LC 224/2025)
 
 # Tesouro Selic
-SELIC_EM_PERCENTUAL = True         # True se o CSV traz % ao dia (ex.: 0.0551)
+SELIC_EM_PERCENTUAL = False        # False: o selic_diaria.csv do baixar_selic.py já vem em decimal (ex.: 0.000551)
 VALOR_APLICADO_SELIC = 50_000.0    # R$ assumidos no título (a custódia depende do valor!)
 TAXA_CUSTODIA_B3 = 0.0020          # 0,20% a.a.
 LIMITE_ISENCAO_CUSTODIA = 10_000.0 # Selic: não paga custódia nos primeiros R$ 10 mil
@@ -183,7 +197,7 @@ def carregar_selic(caminho: Path, datas: pd.DatetimeIndex) -> pd.Series | None:
         return None
 
     df = pd.read_csv(caminho, parse_dates=["data"])
-    taxa = df.set_index("data")["valor"].sort_index()
+    taxa = df.set_index("data")["selic_dia"].sort_index()
     if SELIC_EM_PERCENTUAL:
         taxa = taxa / 100
     return taxa.reindex(datas).ffill().rename("SELIC")
@@ -373,6 +387,28 @@ def validar(ret_bruto: pd.DataFrame, media_liquida: pd.Series, cov: pd.DataFrame
     assert np.allclose(cov, cov.T), "covariância não simétrica"
 
 
+def escolher_taxa_livre_risco(ret_bruto: pd.DataFrame, media_liquida: pd.Series) -> float:
+    """rf do Sharpe, sempre sobre o MESMO período da amostra de retornos.
+
+    - Padrão: Selic bruta anualizada (taxa_livre_risco.py).
+    - Se RF_USA_SELIC_LIQUIDA = True e o Tesouro Selic estiver na carteira: retorno líquido dele.
+    """
+    inicio, fim = ret_bruto.index.min(), ret_bruto.index.max()
+    rf_bruta = taxa_livre_risco_anual(inicio, fim)
+    print(f"Selic bruta anualizada na amostra ({inicio.date()} a {fim.date()}): {rf_bruta:.2%}")
+
+    if RF_USA_SELIC_LIQUIDA and "SELIC" in media_liquida.index:
+        rf = float(media_liquida["SELIC"])
+        print(f"rf usada no Sharpe: Tesouro Selic LÍQUIDO = {rf:.2%}\n")
+        return rf
+
+    if RF_USA_SELIC_LIQUIDA:
+        print("AVISO: RF_USA_SELIC_LIQUIDA = True, mas o Tesouro Selic não está na carteira. "
+              "Usando a Selic bruta.")
+    print(f"rf usada no Sharpe: Selic BRUTA = {rf_bruta:.2%}\n")
+    return rf_bruta
+
+
 # ----------------------------------------------------------------------
 # 7. Carteiras
 # ----------------------------------------------------------------------
@@ -384,7 +420,8 @@ def desempenho_carteiras(pesos: np.ndarray, media: pd.Series, cov: pd.DataFrame)
     return retornos, np.sqrt(variancias)
 
 
-def simular_carteiras(media_bruta, media_liquida, cov, n_carteiras: int = N_CARTEIRAS):
+def simular_carteiras(media_bruta, media_liquida, cov, taxa_livre_risco: float,
+                      n_carteiras: int = N_CARTEIRAS):
     rng = np.random.default_rng(SEMENTE)
     pesos = rng.dirichlet(np.ones(len(media_liquida)), size=n_carteiras)
     retorno_liq, risco = desempenho_carteiras(pesos, media_liquida, cov)
@@ -393,7 +430,7 @@ def simular_carteiras(media_bruta, media_liquida, cov, n_carteiras: int = N_CART
     resultado["retorno_bruto"] = pesos @ media_bruta.to_numpy()
     resultado["retorno"] = retorno_liq          # retorno LÍQUIDO (usado na fronteira)
     resultado["risco"] = risco
-    resultado["sharpe"] = (retorno_liq - TAXA_LIVRE_RISCO) / risco
+    resultado["sharpe"] = (retorno_liq - taxa_livre_risco) / risco
     return resultado
 
 
@@ -438,7 +475,8 @@ def main() -> None:
 
     # Proventos: bruto e líquido de imposto (cada tipo tem sua alíquota)
     prov = carregar_proventos(ARQUIVO_PROVENTOS)
-    prov = ajustar_proventos_eventos(prov, EVENTOS_CORPORATIVOS)
+    if not PROVENTOS_JA_AJUSTADOS:
+           prov = ajustar_proventos_eventos(prov, EVENTOS_CORPORATIVOS)
     if not prov.empty:
         prov["valor_liquido"] = prov["valor"] * (1 - aliquota_provento(prov))
     else:
@@ -475,6 +513,9 @@ def main() -> None:
     media_bruta, media_liquida, cov = estatisticas_anuais(ret_bruto, ret_liquido, reducao)
     validar(ret_bruto, media_liquida, cov)
 
+    # Taxa livre de risco do Sharpe, no mesmo período da amostra
+    rf = escolher_taxa_livre_risco(ret_bruto, media_liquida)
+
     comparacao = tabela_bruto_vs_liquido(media_bruta, media_liquida)
     print("Retorno esperado anual: bruto x líquido")
     print(comparacao.round(4), "\n")
@@ -483,7 +524,7 @@ def main() -> None:
     cov.to_csv(PASTA_RESULTADOS / "matriz_covariancia_liquido.csv")
     media_liquida.to_csv(PASTA_RESULTADOS / "retorno_esperado_liquido.csv", header=["retorno_liquido"])
 
-    carteiras = simular_carteiras(media_bruta, media_liquida, cov)
+    carteiras = simular_carteiras(media_bruta, media_liquida, cov, rf)
     melhor = carteiras.loc[carteiras["sharpe"].idxmax()]
     print("Carteira de máximo Sharpe (líquido):")
     print(f"  retorno líquido {melhor['retorno']:.2%} (bruto {melhor['retorno_bruto']:.2%}) "
